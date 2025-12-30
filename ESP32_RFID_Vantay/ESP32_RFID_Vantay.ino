@@ -118,17 +118,26 @@ bool v6Triggered = false;
 // Queue va Task handle cho FreeRTOS
 QueueHandle_t keypadQueue;                  // Queue cho keypad
 QueueHandle_t rfidQueue;                    // Queue cho RFID
-TaskHandle_t fingerprintTaskHandle = NULL;  // Handle cho task van tay
+TaskHandle_t fingerprintTaskHandle = NULL;  // Bien luu dia chi cho ham xu ly van tay
 unsigned long deleteModeStartTime = 0;      // Thoi diem bat dau che do xoa van tay
 const unsigned long DELETE_TIMEOUT = 10000; // Timeout 10 giay cho che do xoa van tay
 
 // Function prototype
 void showMainMenu();
 void addFingerprint_internal();
-int enrollFingerprint(int id);
+int enrollFingerprint(int id_to_enroll);
 void showOfflineAdminMenuPage();
 void handleOfflineAdminAction(byte page, char choice);
 void checkBlynkCardOpTimeout();
+void loadCardsFromEEPROM();
+void loadPasswordFromEEPROM();
+void savePasswordToEEPROM();
+bool deleteCardFromEEPROM(String uid);
+void clearEEPROM();
+void listRFIDCards();
+void checkRFID();
+void deleteFingerprint(int id_to_delete); 
+
 
 
 // Ham khoi tao he thong
@@ -239,7 +248,7 @@ void setup() {
   }
 
   // Khoi tao cam bien van tay (AS608)
-  int sensorRetries = 3;    // So lan duoc thu lai
+  int sensorRetries = 5;    // So lan duoc thu lai
   bool sensorReady = false;
   while (sensorRetries > 0 && !sensorReady) 
   {
@@ -319,8 +328,9 @@ String getFormattedTime() {
   return String(timeString);
 }
 
-// Ham hien thi tin nhan can giua tren LCD
-void showCentered(String msg1, String msg2) {
+// Ham hien thi tin nhan tren LCD
+void showCentered(String msg1, String msg2) 
+{
   lcd.clear();
   msg1.toUpperCase();
   msg2.toUpperCase();
@@ -355,79 +365,117 @@ void unlockDoor() {
   digitalWrite(LOCK_PIN, LOW);
 }
 
-
-
 // Task doc ban phim trong FreeRTOS
 void keypadTask(void *parameter) {
-  for (;;) {
+  for (;;) 
+  {
     char key = keypad.getKey();
-    if (key) {
+    if (key) 
+    {
       xQueueSend(keypadQueue, &key, portMAX_DELAY);  // Gui phim vao queue
     }
-    vTaskDelay(20 / portTICK_PERIOD_MS); 
+    vTaskDelay(20 / portTICK_PERIOD_MS); // task tam nghi
   }
 }
 
 // Task doc RFID trong FreeRTOS
-void rfidTask(void *parameter) {
-  for (;;) {
-    if (rfid.PICC_IsNewCardPresent()) {  // Kiem tra co the moi
-      if (rfid.PICC_ReadCardSerial()) {  // Doc serial cua the
-        String uid = "";
-        // Chuyen doi UID sang chuoi hex
-        for (byte i = 0; i < rfid.uid.size; i++) {
-          uid += String(rfid.uid.uidByte[i] < 0x10 ? "0" : ""); 
-          uid += String(rfid.uid.uidByte[i], HEX);
+void rfidTask(void *parameter) 
+{
+  for (;;) 
+  {
+    if (rfid.PICC_IsNewCardPresent()) 
+    {  // Kiem tra co the moi
+      if (rfid.PICC_ReadCardSerial()) 
+      {  // Doc serial cua the
+
+        String uid = ""; // Chuyen doi UID sang chuoi hex
+        for (byte i = 0; i < rfid.uid.size; i++) 
+        {
+          uid += String(rfid.uid.uidByte[i] < 0x10 ? "0" : ""); // Them so 0 neu byte nho hon 16
+          uid += String(rfid.uid.uidByte[i], HEX);              // Chuyen byte sang dang HEX
         }
         uid.toUpperCase(); 
-        rfid.PICC_HaltA();       // Dung the
+
+        rfid.PICC_HaltA();        // Dung giao tiep voi the
         rfid.PCD_StopCrypto1();   // Dung ma hoa
-        String* uidPtr = new String(uid); 
-        if (uidPtr) {
-            if (xQueueSend(rfidQueue, &uidPtr, pdMS_TO_TICKS(100)) != pdPASS) { 
+
+        String* uidPtr = new String(uid); // cap phat dong 1 vung nho cho bien uidPtr
+         
+        if (uidPtr) 
+        {
+            if (xQueueSend(rfidQueue, &uidPtr, pdMS_TO_TICKS(100)) != pdPASS) 
+            { // neu gui that bai
                 delete uidPtr; 
                 Serial.println("RFID Task: Failed to send to queue");
             }
-        } else {
+        } 
+        else 
+        {
             Serial.println("RFID Task: Failed to allocate memory for UID");
         }
       } 
     }
-    vTaskDelay(50 / portTICK_PERIOD_MS); 
+    vTaskDelay(50 / portTICK_PERIOD_MS); // task tam nghi
   }
 }
 
 // Task doc van tay lien tuc trong FreeRTOS
-void continuousFingerprintTask(void *parameter) {
-  for (;;) {
+void continuousFingerprintTask(void *parameter) 
+{
+  for (;;) 
+  {
     // Tam dung neu he thong bi khoa hoac dang them van tay hoac dang co thao tac the tu Blynk
-    if (systemLocked || fingerprintMode == FINGER_ADD || isAddingFingerprint || blynkCardOpActive) {
+    if (systemLocked || fingerprintMode == FINGER_ADD || isAddingFingerprint || blynkCardOpActive) 
+    {
       vTaskDelay(100 / portTICK_PERIOD_MS);
       continue;
     }
     
     // Kiem tra timeout cho che do xoa van tay
-    if (fingerprintMode == FINGER_DELETE && (millis() - deleteModeStartTime > DELETE_TIMEOUT)) {
+    if (fingerprintMode == FINGER_DELETE && (millis() - deleteModeStartTime > DELETE_TIMEOUT)) 
+    {
       Serial.println("FingerprintTask: Delete mode timed out");
-      String msg = getFormattedTime() + " >> FINGERPRINT :: DELETE MODE TIMEOUT (SCAN)";
-      if (isOnline) { terminal.println(msg); terminal.flush(); }
-      else { Serial.println(msg + " (OFFLINE)"); }
+      String msg = getFormattedTime() + " >> FINGERPRINT :: DELETE MODE TIMEOUT";
+      if (isOnline) 
+      { 
+        terminal.println(msg); 
+        terminal.flush(); 
+      }
+      else 
+      {
+        Serial.println(msg + " (OFFLINE)"); 
+      }
       fingerprintMode = FINGER_CHECK; // Reset ve che do kiem tra
       showMainMenu(); 
     }
 
     // Doc van tay neu o che do kiem tra hoac xoa
-    if (fingerprintMode == FINGER_CHECK || fingerprintMode == FINGER_DELETE) {
-      int p = finger.getImage();
-      if (p == FINGERPRINT_OK) {
-        if (fingerprintMode == FINGER_CHECK) processFingerprint();  // Xu ly kiem tra van tay
-        else if (fingerprintMode == FINGER_DELETE) deleteFingerprintByScan();  // Xu ly xoa van tay
-      } else if (p != FINGERPRINT_NOFINGER) {
+    if (fingerprintMode == FINGER_CHECK || fingerprintMode == FINGER_DELETE) 
+    {
+      int p = finger.getImage();  // Yeu cau cam bien quet van tay
+      if (p == FINGERPRINT_OK) 
+      {
+        if (fingerprintMode == FINGER_CHECK) 
+          processFingerprint();  // Xu ly kiem tra van tay
+        else if (fingerprintMode == FINGER_DELETE) 
+          deleteFingerprintByScan();  // Xu ly xoa van tay
+      } 
+      else if (p != FINGERPRINT_NOFINGER) 
+      {
         // Bao loi neu co loi khac ngoai khong co van tay
-        if (millis() - lastErrorTime > ERROR_COOLDOWN) {
+        if (millis() - lastErrorTime > ERROR_COOLDOWN) 
+        {
            Serial.println("FingerprintTask: getImage failed with code " + String(p));
            String msg = getFormattedTime() + " >> FINGERPRINT :: GET_IMAGE ERROR - Code: " + String(p);
-           if(isOnline) { terminal.println(msg); terminal.flush(); } else { Serial.println(msg + " (OFFLINE)"); }
+           if(isOnline) 
+           {
+            terminal.println(msg); 
+            terminal.flush(); 
+           } 
+           else 
+           {
+            Serial.println(msg + " (OFFLINE)"); 
+           }
            lastErrorTime = millis();
         }
         vTaskDelay(100 / portTICK_PERIOD_MS);
@@ -438,101 +486,84 @@ void continuousFingerprintTask(void *parameter) {
 }
 
 
-// ============================================
-// CAC HAM BLYNK_WRITE - Xu ly lenh tu Blynk
-// ============================================
+/*******************************************
+* CAC HAM BLYNK_WRITE - Xu ly lenh tu Blynk
+* Duoc goi khi an nut tuong ung tren ap
+*******************************************/
 
-// V6: Them van tay (Online)
-BLYNK_WRITE(V6) {
-  if (!isOnline) { Serial.println("V6: Ignored, offline."); return; }
-  int value = param.asInt();
-  if (value == lastV6Value && v6Triggered) { return; } // Tranh trigger lai
-  if (millis() - lastV6TriggerTime < V6_DEBOUNCE && value != 0) { return; } // Debounce
+// V1: Liet ke cac the RFID (Online)
+BLYNK_WRITE(V1) {
+  if (!isOnline) { 
+    Serial.println("V1: Ignored, offline."); 
+    return; 
+    }
+  if (!expectingPinEntry && !offlineAdminModeActive && !blynkCardOpActive) {
+    Serial.println("V1 Triggered: Listing RFID Cards");
+    if(isOnline) 
+      terminal.println(getFormattedTime() + " >> BLYNK V1 :: LISTING RFID CARDS...");
 
-  if (value == 1 && !expectingPinEntry && !offlineAdminModeActive && !isAddingFingerprint && fingerprintMode != FINGER_ADD && !blynkCardOpActive) {
-    v6Triggered = true;
-    lastV6Value = value;
-    isAddingFingerprint = true;
-    fingerprintMode = FINGER_ADD;
-    lastV6TriggerTime = millis();
-    Serial.println("V6 Triggered: Starting Fingerprint Addition for ID " + String(fingerID));
-    showCentered("ADD FINGER ID " + String(fingerID), "PLACE FINGER");
-    if (isOnline) {terminal.println(getFormattedTime() + " >> BLYNK V6 :: ADD FINGERPRINT ID " + String(fingerID) + " - PLACE FINGER"); terminal.flush();}
-    
-    if(fingerprintTaskHandle != NULL) vTaskSuspend(fingerprintTaskHandle);  // Tam dung task van tay
-    addFingerprint_internal(); 
-    if(fingerprintTaskHandle != NULL) vTaskResume(fingerprintTaskHandle);   // Tiep tuc task van tay
-    
-    isAddingFingerprint = false;
-    fingerprintMode = FINGER_CHECK;
-    showMainMenu();
-  } else if (value == 0) {
-    v6Triggered = false; lastV6Value = 0;
-  } else {
-    Serial.println("V6 Ignored: System busy/conditions not met.");
-    if (isOnline) {terminal.println(getFormattedTime() + " >> BLYNK V6 :: IGNORED - SYSTEM BUSY"); terminal.flush();}
+    listRFIDCards(); 
+
+    if(isOnline) {
+      terminal.println(getFormattedTime() + " >> BLYNK V1 :: CARD LISTING COMPLETE"); 
+      terminal.flush();
+    }
+  } 
+  else {
+    Serial.println("V1 Ignored: System busy");
+    if(isOnline) {
+      terminal.println(getFormattedTime() + " >> BLYNK V1 :: IGNORED - SYSTEM BUSY"); 
+      terminal.flush();
+      }
   }
 }
 
 // V2: Xoa the theo UID (Online)
 BLYNK_WRITE(V2) {
-  if (!isOnline) { Serial.println("V2: Ignored, offline."); return; }
+  if (!isOnline) { 
+    Serial.println("V2: Ignored, offline."); 
+    return; 
+    }
   if (!expectingPinEntry && !offlineAdminModeActive && !blynkCardOpActive) { 
-    pendingCardUID = param.asStr();
+    pendingCardUID = param.asStr();  // lay gia tri UID duoc nhap tu app
     pendingCardUID.toUpperCase();
     if (pendingCardUID != "") {
       Serial.println("V2 Triggered: Deleting Card UID " + pendingCardUID);
       if (deleteCardFromEEPROM(pendingCardUID)) {
-        if(isOnline) terminal.println(getFormattedTime() + " >> BLYNK V2 :: CARD DELETE SUCCESS - UID: " + pendingCardUID);
-        showCentered("CARD DELETED", "SUCCESS"); beepSuccess();
-      } else {
-        if(isOnline) terminal.println(getFormattedTime() + " >> BLYNK V2 :: CARD DELETE FAIL - NOT FOUND: " + pendingCardUID);
-        showCentered("CARD NOT FOUND", "CHECK UID"); beepFailure();
+        if(isOnline) 
+          terminal.println(getFormattedTime() + " >> BLYNK V2 :: CARD DELETE SUCCESS - UID: " + pendingCardUID);
+        showCentered("CARD DELETED", "SUCCESS"); 
+        beepSuccess();
+      } 
+      else {
+        if(isOnline) {
+          terminal.println(getFormattedTime() + " >> BLYNK V2 :: CARD DELETE FAIL - NOT FOUND: " + pendingCardUID);
+          terminal.flush;
+        }
+        showCentered("CARD NOT FOUND", "CHECK UID"); 
+        beepFailure();
       }
-      if (isOnline) terminal.flush();
-      pendingCardUID = ""; delay(2000); showMainMenu();
+
+      pendingCardUID = ""; 
+      delay(2000); 
+      showMainMenu();
     }
-  } else {
+  } 
+  else {
     Serial.println("V2 Ignored: System busy");
-    if(isOnline) {terminal.println(getFormattedTime() + " >> BLYNK V2 :: IGNORED - SYSTEM BUSY"); terminal.flush();}
-  }
-}
-
-// V9: Xoa van tay theo ID (Online)
-BLYNK_WRITE(V9) {
-  if (!isOnline) { Serial.println("V9: Ignored, offline."); return; }
-  if (!expectingPinEntry && !offlineAdminModeActive && !blynkCardOpActive) {
-    pendingFingerID = param.asStr();
-    if (pendingFingerID != "") {
-      Serial.println("V9 Triggered: Deleting Fingerprint ID " + pendingFingerID);
-      int id = pendingFingerID.toInt();
-      deleteFingerprint(id); 
-      pendingFingerID = "";
-    }
-  } else {
-    Serial.println("V9 Ignored: System busy");
-    if(isOnline) {terminal.println(getFormattedTime() + " >> BLYNK V9 :: IGNORED - SYSTEM BUSY"); terminal.flush();}
-  }
-}
-
-// V5: Xoa toan bo EEPROM (Online)
-BLYNK_WRITE(V5) {
-  if (!isOnline) { Serial.println("V5: Ignored, offline."); return; }
-  if (!expectingPinEntry && !offlineAdminModeActive && !blynkCardOpActive) {
-    Serial.println("V5 Triggered: Clearing EEPROM");
-    clearEEPROM(); 
-    if (isOnline) {terminal.println(getFormattedTime() + " >> BLYNK V5 :: ALL DATA CLEARED - SYSTEM RESET"); terminal.flush();}
-    showCentered("ALL DATA CLEARED", "SYSTEM RESET"); beepSuccess();
-    delay(2000); showMainMenu();
-  } else {
-    Serial.println("V5 Ignored: System busy");
-    if(isOnline) {terminal.println(getFormattedTime() + " >> BLYNK V5 :: IGNORED - SYSTEM BUSY"); terminal.flush();}
+    if(isOnline) {
+      terminal.println(getFormattedTime() + " >> BLYNK V2 :: IGNORED - SYSTEM BUSY"); 
+      terminal.flush();
+      }
   }
 }
 
 // V3: Che do them the (Online - quet the)
 BLYNK_WRITE(V3) {
-    if (!isOnline) { Serial.println("V3: Ignored, offline."); return; }
+    if (!isOnline) { 
+      Serial.println("V3: Ignored, offline."); 
+      return; 
+      }
     // Kiem tra neu co che do khac dang hoat dong
     if (!expectingPinEntry && !offlineAdminModeActive && !addCardMode && !blynkCardOpActive && !deleteCardMode && !isAddingFingerprint && fingerprintMode == FINGER_CHECK) {
         addCardMode = true; 
@@ -547,7 +578,8 @@ BLYNK_WRITE(V3) {
             terminal.flush();
         }
         beepSuccess();
-    } else {
+    } 
+    else {
         Serial.println("V3 Ignored: System busy or already in a conflicting mode.");
         if (isOnline) {
             terminal.println(getFormattedTime() + " >> BLYNK V3 :: IGNORED - SYSTEM BUSY/MODE ACTIVE");
@@ -558,7 +590,10 @@ BLYNK_WRITE(V3) {
 
 // V4: Che do xoa the bang cach quet (Online)
 BLYNK_WRITE(V4) {
-    if (!isOnline) { Serial.println("V4: Ignored, offline."); return; }
+    if (!isOnline) { 
+      Serial.println("V4: Ignored, offline."); 
+      return; 
+      }
     if (!expectingPinEntry && !offlineAdminModeActive && !deleteCardMode && !blynkCardOpActive && !addCardMode && !isAddingFingerprint && fingerprintMode == FINGER_CHECK) {
         deleteCardMode = true; 
         addCardMode = false;
@@ -572,7 +607,8 @@ BLYNK_WRITE(V4) {
             terminal.flush();
         }
         beepSuccess();
-    } else {
+    } 
+    else {
         Serial.println("V4 Ignored: System busy or already in a conflicting mode.");
         if (isOnline) {
             terminal.println(getFormattedTime() + " >> BLYNK V4 :: IGNORED - SYSTEM BUSY/MODE ACTIVE");
@@ -581,62 +617,100 @@ BLYNK_WRITE(V4) {
     }
 }
 
-// V1: Liet ke cac the RFID (Online)
-BLYNK_WRITE(V1) {
-  if (!isOnline) { Serial.println("V1: Ignored, offline."); return; }
+// V5: Xoa toan bo EEPROM (Online)
+BLYNK_WRITE(V5) {
+  if (!isOnline) { 
+    Serial.println("V5: Ignored, offline."); 
+    return; 
+    }
   if (!expectingPinEntry && !offlineAdminModeActive && !blynkCardOpActive) {
-    Serial.println("V1 Triggered: Listing RFID Cards");
-    if(isOnline) terminal.println(getFormattedTime() + " >> BLYNK V1 :: LISTING RFID CARDS...");
-    listRFIDCards(); 
-    if(isOnline) terminal.println(getFormattedTime() + " >> BLYNK V1 :: CARD LISTING COMPLETE"); terminal.flush();
-  } else {
-    Serial.println("V1 Ignored: System busy");
-    if(isOnline) {terminal.println(getFormattedTime() + " >> BLYNK V1 :: IGNORED - SYSTEM BUSY"); terminal.flush();}
+    Serial.println("V5 Triggered: Clearing EEPROM");
+    clearEEPROM(); 
+    if (isOnline) {
+      terminal.println(getFormattedTime() + " >> BLYNK V5 :: ALL DATA CLEARED - SYSTEM RESET"); 
+      terminal.flush();
+      }
+    showCentered("ALL DATA CLEARED", "SYSTEM RESET"); 
+    beepSuccess();
+    delay(2000); 
+    showMainMenu();
+  } 
+  else {
+    Serial.println("V5 Ignored: System busy");
+    if(isOnline) {
+      terminal.println(getFormattedTime() + " >> BLYNK V5 :: IGNORED - SYSTEM BUSY"); 
+      terminal.flush();
+      }
   }
 }
 
-// V10: Doi mat khau tu Blynk
-BLYNK_WRITE(V10) {
-  if (!isOnline) { Serial.println("V10: Ignored, offline."); return; }
-  if (!expectingPinEntry && !offlineAdminModeActive && !blynkCardOpActive) {
-    String newPassword = param.asStr();
-    Serial.println("V10 Triggered: Changing Password to " + newPassword);
-    if (newPassword.length() >= 4 && newPassword.length() <= 8) {
-      defaultPassword = newPassword;
-      savePasswordToEEPROM();
-      if (isOnline) terminal.println(getFormattedTime() + " >> BLYNK V10 :: USER PASSWORD CHANGED");
-      showCentered("PASSWORD CHANGED", "SUCCESS (BLY)"); beepSuccess();
-    } else {
-      if (isOnline) terminal.println(getFormattedTime() + " >> BLYNK V10 :: INVALID NEW PASSWORD - MUST BE 4-8 CHARS");
-      showCentered("INVALID PASSWORD", "4-8 CHARS (BLY)"); beepFailure();
-    }
-    if (isOnline) terminal.flush(); delay(2000); showMainMenu();
-  } else {
-    Serial.println("V10 Ignored: System busy");
-    if(isOnline) {terminal.println(getFormattedTime() + " >> BLYNK V10 :: IGNORED - SYSTEM BUSY"); terminal.flush();}
+// V6: Them van tay (Online)
+BLYNK_WRITE(V6) 
+{
+  if (!isOnline) 
+  { 
+    Serial.println("V6: Ignored, offline."); 
+    return; 
   }
-}
+  int value = param.asInt(); // Lay gia tri tu nut nhan tren app
+  if (value == lastV6Value && v6Triggered) 
+  { 
+    // Tranh trigger lai
+    return; 
+  } 
 
-// V8: Mo khoa cua tu xa (Online)
-BLYNK_WRITE(V8) {
-  if (!isOnline) { Serial.println("V8: Ignored, offline."); return; }
-  if (!expectingPinEntry && !offlineAdminModeActive && !blynkCardOpActive) {
-    int value = param.asInt();
-    if (value == 1) {
-      Serial.println("V8 Triggered: Remote Door Unlock");
-      if (isOnline) {terminal.println(getFormattedTime() + " >> BLYNK V8 :: REMOTE UNLOCK - DOOR OPENED"); terminal.flush();}
-      showCentered("REMOTE UNLOCK", "DOOR OPENED");
-      unlockDoor(); beepSuccess(); delay(2000); showMainMenu();
+  if (millis() - lastV6TriggerTime < V6_DEBOUNCE && value != 0) 
+  { 
+    // Debounce
+    return; 
+  } 
+
+  if (value == 1 && !expectingPinEntry && !offlineAdminModeActive && !isAddingFingerprint && fingerprintMode != FINGER_ADD && !blynkCardOpActive) 
+  {
+    v6Triggered = true;
+    lastV6Value = value;
+    isAddingFingerprint = true;
+    fingerprintMode = FINGER_ADD;
+    lastV6TriggerTime = millis();
+    Serial.println("V6 Triggered: Starting Fingerprint Addition for ID " + String(fingerID));
+    showCentered("ADD FINGER ID " + String(fingerID), "PLACE FINGER");
+    if (isOnline) 
+    {
+      terminal.println(getFormattedTime() + " >> BLYNK V6 :: ADD FINGERPRINT ID " + String(fingerID) + " - PLACE FINGER"); 
+      terminal.flush();
     }
-  } else {
-    Serial.println("V8 Ignored: System busy");
-    if(isOnline) {terminal.println(getFormattedTime() + " >> BLYNK V8 :: IGNORED - SYSTEM BUSY"); terminal.flush();}
+    
+    if(fingerprintTaskHandle != NULL) 
+      vTaskSuspend(fingerprintTaskHandle);  // Tam dung task 
+
+    addFingerprint_internal();  // Bat dau qua trinh them van tay
+
+    if(fingerprintTaskHandle != NULL) 
+      vTaskResume(fingerprintTaskHandle);   // Tiep tuc task 
+    
+    isAddingFingerprint = false;
+    fingerprintMode = FINGER_CHECK;
+    showMainMenu();
+  } 
+  else if (value == 0) {
+    v6Triggered = false; 
+    lastV6Value = 0;
+  } 
+  else {
+    Serial.println("V6 Ignored: System busy/conditions not met.");
+    if (isOnline) {
+      terminal.println(getFormattedTime() + " >> BLYNK V6 :: IGNORED - SYSTEM BUSY"); 
+      terminal.flush();
+      }
   }
 }
 
 // V7: Xoa van tay bang cach quet (Online)
 BLYNK_WRITE(V7) {
-  if (!isOnline) { Serial.println("V7: Ignored, offline."); return; }
+  if (!isOnline) { 
+    Serial.println("V7: Ignored, offline."); 
+    return; 
+    }
   if (!expectingPinEntry && !offlineAdminModeActive && !blynkCardOpActive && !isAddingFingerprint) {
     int value = param.asInt();
     if (value == 1 && fingerprintMode != FINGER_DELETE) { 
@@ -644,19 +718,124 @@ BLYNK_WRITE(V7) {
       deleteModeStartTime = millis(); 
       Serial.println("V7 Triggered: Fingerprint Delete Mode Enabled (Scan)");
       showCentered("DELETE FINGER", "PLACE FINGER (BLY)");
-      if (isOnline) {terminal.println(getFormattedTime() + " >> BLYNK V7 :: FINGERPRINT DELETE MODE (SCAN) - PLACE FINGER"); terminal.flush();}
+      if (isOnline) {
+        terminal.println(getFormattedTime() + " >> BLYNK V7 :: FINGERPRINT DELETE MODE (SCAN) - PLACE FINGER"); 
+        terminal.flush();
+        }
       beepSuccess();
-    } else if (value == 0 && fingerprintMode == FINGER_DELETE) { 
+    } 
+    else if (value == 0 && fingerprintMode == FINGER_DELETE) { 
       fingerprintMode = FINGER_CHECK; // Huy che do neu nut bi tat
-      if (isOnline) {terminal.println(getFormattedTime() + " >> BLYNK V7 :: FINGERPRINT DELETE MODE (SCAN) DEACTIVATED"); terminal.flush();}
+      if (isOnline) {
+        terminal.println(getFormattedTime() + " >> BLYNK V7 :: FINGERPRINT DELETE MODE (SCAN) DEACTIVATED"); 
+        terminal.flush();
+        }
       showMainMenu();
       Serial.println("V7: Fingerprint Delete Mode Deactivated by Blynk");
     }
   } else {
     Serial.println("V7 Ignored: System busy or already in mode");
-    if(isOnline) {terminal.println(getFormattedTime() + " >> BLYNK V7 :: IGNORED - SYSTEM BUSY/MODE ACTIVE"); terminal.flush();}
+    if(isOnline) {
+      terminal.println(getFormattedTime() + " >> BLYNK V7 :: IGNORED - SYSTEM BUSY/MODE ACTIVE"); 
+      terminal.flush();
+      }
   }
 }
+
+// V8: Mo khoa cua tu xa (Online)
+BLYNK_WRITE(V8) {
+  if (!isOnline) { 
+    Serial.println("V8: Ignored, offline."); 
+    return; 
+    }
+  if (!expectingPinEntry && !offlineAdminModeActive && !blynkCardOpActive) {
+    int value = param.asInt();
+    if (value == 1) {
+      Serial.println("V8 Triggered: Remote Door Unlock");
+      if (isOnline) {
+        terminal.println(getFormattedTime() + " >> BLYNK V8 :: REMOTE UNLOCK - DOOR OPENED"); 
+        terminal.flush();
+        }
+      showCentered("REMOTE UNLOCK", "DOOR OPENED");
+      unlockDoor(); 
+      beepSuccess(); 
+      delay(2000); 
+      showMainMenu();
+    }
+  } 
+  else {
+    Serial.println("V8 Ignored: System busy");
+    if(isOnline) {
+      terminal.println(getFormattedTime() + " >> BLYNK V8 :: IGNORED - SYSTEM BUSY"); 
+      terminal.flush();
+      }
+  }
+}
+
+// V9: Xoa van tay theo ID (Online)
+BLYNK_WRITE(V9) {
+  if (!isOnline) { 
+    Serial.println("V9: Ignored, offline."); 
+    return; 
+    }
+  if (!expectingPinEntry && !offlineAdminModeActive && !blynkCardOpActive) {
+    pendingFingerID = param.asStr(); // Lay gia tri ID tu blynk
+    if (pendingFingerID != "") {
+      Serial.println("V9 Triggered: Deleting Fingerprint ID " + pendingFingerID);
+      int id = pendingFingerID.toInt();
+      deleteFingerprint(id); 
+      pendingFingerID = "";
+    }
+  } 
+  else {
+    Serial.println("V9 Ignored: System busy");
+    if(isOnline) {
+      terminal.println(getFormattedTime() + " >> BLYNK V9 :: IGNORED - SYSTEM BUSY"); 
+      terminal.flush();
+      }
+  }
+}
+
+// V10: Doi mat khau tu Blynk
+BLYNK_WRITE(V10) {
+  if (!isOnline) { 
+    Serial.println("V10: Ignored, offline."); 
+    return; 
+    }
+  if (!expectingPinEntry && !offlineAdminModeActive && !blynkCardOpActive) {
+    String newPassword = param.asStr();
+    Serial.println("V10 Triggered: Changing Password to " + newPassword);
+    if (newPassword.length() >= 4 && newPassword.length() <= 8) {
+      defaultPassword = newPassword;
+      savePasswordToEEPROM();
+      if (isOnline) 
+        terminal.println(getFormattedTime() + " >> BLYNK V10 :: USER PASSWORD CHANGED");
+
+      showCentered("PASSWORD CHANGED", "SUCCESS (BLY)"); 
+      beepSuccess();
+    } 
+    else {
+      if (isOnline) 
+        terminal.println(getFormattedTime() + " >> BLYNK V10 :: INVALID NEW PASSWORD - MUST BE 4-8 CHARS");
+
+      showCentered("INVALID PASSWORD", "4-8 CHARS (BLY)"); 
+      beepFailure();
+    }
+    if (isOnline) 
+      terminal.flush(); 
+    
+    delay(2000); 
+    showMainMenu();
+  } 
+  else {
+    Serial.println("V10 Ignored: System busy");
+    if(isOnline) {
+      terminal.println(getFormattedTime() + " >> BLYNK V10 :: IGNORED - SYSTEM BUSY"); 
+      terminal.flush();
+      }
+  }
+}
+
 
 // Ham hien thi menu chinh
 void showMainMenu() {
@@ -702,16 +881,30 @@ void lockoutSystem() {
   systemLocked = true;
   showCentered("SYSTEM LOCKED", "WAIT 30 SEC");
   String logMsg = getFormattedTime() + " >> SYSTEM :: LOCKED - TOO MANY FAILED ATTEMPTS";
-  if (isOnline) { terminal.println(logMsg); terminal.flush(); } else { Serial.println(logMsg + " (OFFLINE)"); }
+  if (isOnline) { 
+    terminal.println(logMsg); 
+    terminal.flush(); 
+    } 
+    else { 
+      Serial.println(logMsg + " (OFFLINE)"); 
+      }
   
   unsigned long lockoutEndTime = millis() + 30000;  // Khoa trong 30 giay
   while (millis() < lockoutEndTime) {
-    tone(BUZZER_PIN, 500, 200); delay(800); noTone(BUZZER_PIN); // Phat am thanh bao hieu
-    if (isOnline) Blynk.run(); // Giu ket noi Blynk neu co the
+    tone(BUZZER_PIN, 500, 200); 
+    delay(800); 
+    noTone(BUZZER_PIN); // Phat am thanh bao hieu
+    if (isOnline) 
+      Blynk.run(); // Giu ket noi Blynk neu co the
   }
   systemLocked = false; failedAttempts = 0; 
-  if (isOnline) { terminal.println(getFormattedTime() + " >> SYSTEM :: UNLOCKED - LOCKOUT PERIOD ENDED"); terminal.flush(); }
-  else { Serial.println(getFormattedTime() + " >> SYSTEM :: UNLOCKED (OFFLINE)");}
+  if (isOnline) { 
+    terminal.println(getFormattedTime() + " >> SYSTEM :: UNLOCKED - LOCKOUT PERIOD ENDED"); 
+    terminal.flush(); 
+    }
+  else { 
+    Serial.println(getFormattedTime() + " >> SYSTEM :: UNLOCKED (OFFLINE)");
+    }
   showMainMenu(); 
 }
 
@@ -722,8 +915,12 @@ void showOfflineAdminMenuPage() {
   displayPassword = "";
   lastKeyTime = millis(); // Reset timeout cho dieu huong menu
 
-  Serial.print("Showing Offline Admin Menu Page: "); Serial.println(offlineAdminMenuPage);
-  if (isOnline) { terminal.println(getFormattedTime() + " >> ADMIN :: MENU PAGE " + String(offlineAdminMenuPage)); terminal.flush(); }
+  Serial.print("Showing Offline Admin Menu Page: "); 
+  Serial.println(offlineAdminMenuPage);
+  if (isOnline) { 
+    terminal.println(getFormattedTime() + " >> ADMIN :: MENU PAGE " + String(offlineAdminMenuPage)); 
+    terminal.flush(); 
+    }
 
   switch (offlineAdminMenuPage) {
     case 1: showCentered("1.ADD FINGER", "2.DEL FINGER(#>)"); break;  // Trang 1: Quan ly van tay
@@ -739,7 +936,10 @@ void showOfflineAdminMenuPage() {
 
 // Ham xu ly hanh dong trong menu admin offline
 void handleOfflineAdminAction(byte page, char choice) {
-  Serial.print("Admin Action: Page "); Serial.print(page); Serial.print(", Choice "); Serial.println(choice);
+  Serial.print("Admin Action: Page "); 
+  Serial.print(page); 
+  Serial.print(", Choice "); 
+  Serial.println(choice);
   lastKeyTime = millis(); // Reset timeout
   String adminActionLog;
 
@@ -748,27 +948,49 @@ void handleOfflineAdminAction(byte page, char choice) {
       if (choice == '1') { // Them van tay
         adminActionLog = " >> ADMIN :: ADD FINGERPRINT SELECTED";
         Serial.println("Admin: Add Fingerprint selected.");
-        if(fingerprintTaskHandle != NULL) vTaskSuspend(fingerprintTaskHandle);
+
+        if(fingerprintTaskHandle != NULL) 
+          vTaskSuspend(fingerprintTaskHandle);
+
         isAddingFingerprint = true;   
         fingerprintMode = FINGER_ADD;  
         showCentered("ADD FINGER ID " + String(fingerID), "PLACE FINGER");
-        if(isOnline) { terminal.println(getFormattedTime() + adminActionLog + " - ID " + String(fingerID)); terminal.flush(); }
-        else { Serial.println(adminActionLog + " - ID " + String(fingerID) + " (OFFLINE)");}
+
+        if(isOnline) { 
+          terminal.println(getFormattedTime() + adminActionLog + " - ID " + String(fingerID)); 
+          terminal.flush(); 
+          }
+        else { 
+          Serial.println(adminActionLog + " - ID " + String(fingerID) + " (OFFLINE)");
+          }
+
         addFingerprint_internal(); 
         isAddingFingerprint = false;
-        fingerprintMode = FINGER_CHECK; 
-        if(fingerprintTaskHandle != NULL) vTaskResume(fingerprintTaskHandle);
+        fingerprintMode = FINGER_CHECK;
+
+        if(fingerprintTaskHandle != NULL) 
+          vTaskResume(fingerprintTaskHandle);
+
         showOfflineAdminMenuPage(); 
-      } else if (choice == '2') { // Xoa van tay bang cach quet
+      } 
+      else if (choice == '2') { // Xoa van tay bang cach quet
         adminActionLog = " >> ADMIN :: DELETE FINGERPRINT BY SCAN SELECTED";
         Serial.println("Admin: Delete Fingerprint by scan selected.");
         fingerprintMode = FINGER_DELETE;
         deleteModeStartTime = millis(); 
         showCentered("DELETE FINGER", "PLACE FINGER");
-        if(isOnline) { terminal.println(getFormattedTime() + adminActionLog); terminal.flush(); }
-        else { Serial.println(adminActionLog + " (OFFLINE)");}
+
+        if(isOnline) { 
+          terminal.println(getFormattedTime() + adminActionLog); 
+          terminal.flush(); 
+          }
+        else { 
+          Serial.println(adminActionLog + " (OFFLINE)");}
         // continuousFingerprintTask se xu ly phan con lai va goi showMainMenu
-      } else { beepFailure(); showOfflineAdminMenuPage(); }
+      } 
+      else { 
+        beepFailure(); 
+        showOfflineAdminMenuPage(); }
       break;
 
     case 2: // Trang quan ly the RFID
@@ -778,19 +1000,34 @@ void handleOfflineAdminAction(byte page, char choice) {
         addCardMode = true;
         deleteCardMode = false;
         showCentered("ADMIN ADD CARD", "SWIPE CARD NOW");
-        if(isOnline) { terminal.println(getFormattedTime() + adminActionLog); terminal.flush(); }
-        else { Serial.println(adminActionLog + " (OFFLINE)");}
+
+        if(isOnline) { 
+          terminal.println(getFormattedTime() + adminActionLog); 
+          terminal.flush(); 
+          }
+        else { 
+          Serial.println(adminActionLog + " (OFFLINE)");
+          }
         // checkRFID se xu ly, sau do goi showMainMenu
-      } else if (choice == '2') { // Xoa the RFID bang cach quet
+      } 
+      else if (choice == '2') { // Xoa the RFID bang cach quet
         adminActionLog = " >> ADMIN :: DELETE RFID CARD BY SWIPE SELECTED - SWIPE CARD";
         Serial.println("Admin: Delete Card by swipe selected.");
         deleteCardMode = true;
         addCardMode = false;
         showCentered("ADMIN DEL CARD", "SWIPE CARD NOW");
-        if(isOnline) { terminal.println(getFormattedTime() + adminActionLog); terminal.flush(); }
-        else { Serial.println(adminActionLog + " (OFFLINE)");}
+
+        if(isOnline) { 
+          terminal.println(getFormattedTime() + adminActionLog); 
+          terminal.flush(); 
+          }
+        else { 
+          Serial.println(adminActionLog + " (OFFLINE)");}
         // checkRFID se xu ly, sau do goi showMainMenu
-      } else { beepFailure(); showOfflineAdminMenuPage(); }
+      } 
+      else { 
+        beepFailure(); 
+        showOfflineAdminMenuPage(); }
       break;
 
     case 3: // Trang quan ly mat khau
@@ -802,20 +1039,37 @@ void handleOfflineAdminAction(byte page, char choice) {
         offlineAdminMenuPage = 0;
         inputPassword = ""; displayPassword = "";
         showCentered("NEW USER PWD:", ""); 
-        if(isOnline) { terminal.println(getFormattedTime() + adminActionLog); terminal.flush(); }
-        else { Serial.println(adminActionLog + " (OFFLINE)");}
+
+        if(isOnline) { 
+          terminal.println(getFormattedTime() + adminActionLog); 
+          terminal.flush(); 
+          }
+        else { 
+          Serial.println(adminActionLog + " (OFFLINE)");
+          }
         // Logic keypad cho changePasswordMode se xu ly
-      } else if (choice == '2') { // Reset mat khau ve mac dinh
+      } 
+      else if (choice == '2') { // Reset mat khau ve mac dinh
         adminActionLog = " >> ADMIN :: USER PASSWORD RESET TO DEFAULT (8888)";
         Serial.println("Admin: Reset User Password selected.");
         defaultPassword = "8888";
         savePasswordToEEPROM();
-        if(isOnline) { terminal.println(getFormattedTime() + adminActionLog); terminal.flush(); }
-        else { Serial.println(adminActionLog + " (OFFLINE)"); }
-        showCentered("PWD RESET TO", "DEFAULT (8888)"); beepSuccess();
+        if(isOnline) { 
+          terminal.println(getFormattedTime() + adminActionLog); 
+          terminal.flush(); 
+          }
+        else { 
+          Serial.println(adminActionLog + " (OFFLINE)"); 
+          }
+        showCentered("PWD RESET TO", "DEFAULT (8888)"); 
+        beepSuccess();
         delay(2000);
         showOfflineAdminMenuPage(); 
-      } else { beepFailure(); showOfflineAdminMenuPage(); }
+      } 
+      else { 
+        beepFailure(); 
+        showOfflineAdminMenuPage(); 
+        }
       break;
       
     default:
@@ -832,7 +1086,10 @@ void checkKeypad() {
     Serial.print("Key pressed: "); Serial.println(key);
     lastKeyTime = millis();
 
-    if (systemLocked) { beepFailure(); return; }  // Bo qua neu he thong bi khoa
+    if (systemLocked) { 
+      beepFailure(); 
+      return; 
+      }  // Bo qua neu he thong bi khoa
     if (blynkCardOpActive) { // Bo qua neu dang co thao tac the tu Blynk
         Serial.println("Keypad ignored: Blynk card operation active.");
         return;
@@ -842,34 +1099,57 @@ void checkKeypad() {
     if (expectingPinEntry) {
       beepSuccess(); 
       if (key == '#') {  // Xac nhan mat khau
-        Serial.print("PIN/Password entered: "); Serial.println(inputPassword);
+        Serial.print("PIN/Password entered: "); 
+        Serial.println(inputPassword);
         String enteredPin = inputPassword;
-        inputPassword = ""; displayPassword = "";
+        inputPassword = ""; 
+        displayPassword = "";
 
         if (enteredPin == MASTER_OFFLINE_ADMIN_PIN) {  // PIN admin
           Serial.println("Admin PIN correct. Entering Admin Menu.");
-          if(isOnline) { terminal.println(getFormattedTime() + " >> KEYPAD :: ADMIN LOGIN SUCCESS"); terminal.flush(); }
+          if(isOnline) { 
+            terminal.println(getFormattedTime() + " >> KEYPAD :: ADMIN LOGIN SUCCESS"); 
+            terminal.flush(); 
+            }
           expectingPinEntry = false;
           offlineAdminModeActive = true;
           offlineAdminMenuPage = 1; 
           showOfflineAdminMenuPage();
-        } else if (enteredPin == defaultPassword) {  // Mat khau nguoi dung
+        } 
+        else if (enteredPin == defaultPassword) {  // Mat khau nguoi dung
           Serial.println("User password correct. Unlocking door.");
           String msg = getFormattedTime() + " >> KEYPAD :: USER LOGIN SUCCESS - DOOR OPENED";
-          if(isOnline) { terminal.println(msg); terminal.flush(); } else { Serial.println(msg + " (OFFLINE)"); }
+
+          if(isOnline) { 
+            terminal.println(msg); 
+            terminal.flush(); 
+            } 
+          else { 
+              Serial.println(msg + " (OFFLINE)"); 
+              }
           showCentered("ACCESS GRANTED", "DOOR UNLOCKED");
           unlockDoor();
           failedAttempts = 0; beepSuccess();
           delay(2000);
           showMainMenu();
-        } else {  // Mat khau sai
+        } 
+        else {  // Mat khau sai
           Serial.println("Incorrect PIN/Password.");
           String msg = getFormattedTime() + " >> KEYPAD :: LOGIN FAIL - INCORRECT PIN/PASSWORD";
-          if(isOnline) { terminal.println(msg); terminal.flush(); } else { Serial.println(msg + " (OFFLINE)"); }
+          if(isOnline) { 
+            terminal.println(msg); 
+            terminal.flush(); 
+            } 
+          else { 
+            Serial.println(msg + " (OFFLINE)"); 
+            }
           failedAttempts++;
           showCentered("ACCESS DENIED", "ATTEMPS: " + String(max(0, 5 - failedAttempts)));
           beepFailure();
-          if (failedAttempts >= 5) { lockoutSystem(); return; }  // Khoa he thong neu sai 5 lan
+          if (failedAttempts >= 5) { 
+            lockoutSystem(); 
+            return; 
+            }  // Khoa he thong neu sai 5 lan
           delay(2000);
           expectingPinEntry = false;
           showMainMenu(); 
@@ -878,12 +1158,17 @@ void checkKeypad() {
         inputPassword = ""; displayPassword = "";
         showCentered("MAT KHAU:", displayPassword);
         Serial.println("PIN entry reset by *.");
+
       } else if (isdigit(key)) {  // Nhap so
         if (inputPassword.length() < 8) { 
           inputPassword += key; displayPassword += "*";
           showCentered("MAT KHAU:", displayPassword);
-        } else { beepFailure(); } 
-      } else { beepFailure(); }
+        } else { 
+          beepFailure(); 
+          } 
+      } else { 
+        beepFailure(); 
+        }
       return; 
     }
 
@@ -897,7 +1182,10 @@ void checkKeypad() {
       } else if (key == '*') { // Thoat menu admin
         beepSuccess();
         Serial.println("Exiting Admin Menu via *.");
-        if(isOnline) { terminal.println(getFormattedTime() + " >> ADMIN :: EXIT MENU"); terminal.flush(); }
+        if(isOnline) { 
+          terminal.println(getFormattedTime() + " >> ADMIN :: EXIT MENU"); 
+          terminal.flush(); 
+          }
         offlineAdminModeActive = false;
         offlineAdminMenuPage = 0;
         showMainMenu();
@@ -923,12 +1211,24 @@ void checkKeypad() {
           defaultPassword = inputPassword;
           savePasswordToEEPROM();
           String msg = getFormattedTime() + " >> KEYPAD :: NEW USER PASSWORD SET (ADMIN)";
-          if(isOnline) { terminal.println(msg); terminal.flush(); } else { Serial.println(msg + " (OFFLINE)"); }
+          if(isOnline) { 
+            terminal.println(msg); 
+            terminal.flush(); 
+            } 
+          else { 
+            Serial.println(msg + " (OFFLINE)"); 
+            }
           showCentered("PWD CHANGED", "SUCCESS (ADMIN)"); beepSuccess();
           Serial.println("User password changed successfully to: " + defaultPassword);
         } else {
           String msg = getFormattedTime() + " >> KEYPAD :: NEW USER PASSWORD FAIL - INVALID LENGTH (4-8 CHARS)";
-          if(isOnline) { terminal.println(msg); terminal.flush(); } else { Serial.println(msg + " (OFFLINE)");}
+          if(isOnline) { 
+            terminal.println(msg); 
+            terminal.flush(); 
+            } 
+          else 
+          { Serial.println(msg + " (OFFLINE)");
+          }
           showCentered("INVALID PWD", "4-8 CHARS REQ"); beepFailure();
           Serial.println("Invalid new password length.");
         }
@@ -955,7 +1255,10 @@ void checkKeypad() {
       displayPassword = "";
       showCentered("MAT KHAU:", ""); 
       Serial.println("'*' pressed. Entering PIN/Password mode.");
-      if(isOnline) { terminal.println(getFormattedTime() + " >> KEYPAD :: PIN ENTRY MODE ACTIVATED"); terminal.flush(); }
+      if(isOnline) { 
+        terminal.println(getFormattedTime() + " >> KEYPAD :: PIN ENTRY MODE ACTIVATED"); 
+        terminal.flush(); 
+        }
     }
   }
 
@@ -970,8 +1273,13 @@ void checkKeypad() {
     
     Serial.println(modeTimedOutStr + " timed out due to inactivity.");
     String msg = getFormattedTime() + " >> KEYPAD :: " + modeTimedOutStr + " TIMEOUT";
-    if (isOnline) { terminal.println(msg); terminal.flush(); }
-    else { Serial.println(msg + " (OFFLINE)"); }
+    if (isOnline) { 
+      terminal.println(msg); 
+      terminal.flush(); 
+      }
+    else { 
+      Serial.println(msg + " (OFFLINE)"); 
+      }
     
     showCentered(modeTimedOutStr, "TIMED OUT");
     beepFailure();
@@ -1013,30 +1321,60 @@ void processFingerprint() {
     if (millis() - lastErrorTime > ERROR_COOLDOWN) {
       Serial.println("processFingerprint: Failed to convert image, code " + String(p));
       String msg = getFormattedTime() + " >> FINGERPRINT :: IMAGE CONVERT FAIL - Code: " + String(p);
-      if(isOnline){ terminal.println(msg); terminal.flush(); } else { Serial.println(msg + " (OFFLINE)");}
+      if(isOnline){ 
+        terminal.println(msg); 
+        terminal.flush(); 
+        } 
+      else { 
+        Serial.println(msg + " (OFFLINE)");
+        }
       showCentered("FP SCAN ERROR", "TRY AGAIN"); lastErrorTime = millis();
     }
-    beepFailure(); delay(1000); showMainMenu(); return;
+    beepFailure(); 
+    delay(1000); 
+    showMainMenu(); 
+    return;
   }
   
   p = finger.fingerFastSearch();  // Tim kiem van tay trong database
   if (p == FINGERPRINT_OK) {
     int fid = finger.fingerID;
     String logMsg = getFormattedTime() + " >> FINGERPRINT :: ACCESS GRANTED - ID: " + String(fid) + ", Confidence: " + String(finger.confidence);
-    if (isOnline) { terminal.println(logMsg); terminal.flush(); } else { Serial.println(logMsg + " (OFFLINE)"); }
+
+    if (isOnline) { 
+      terminal.println(logMsg); 
+      terminal.flush(); 
+      } 
+    else { 
+      Serial.println(logMsg + " (OFFLINE)"); 
+      }
     showCentered("ACCESS GRANTED", "FINGER ID: " + String(fid));
-    unlockDoor(); failedAttempts = 0; beepSuccess();
+    unlockDoor(); 
+    failedAttempts = 0; 
+    beepSuccess();
     Serial.println("processFingerprint: Access Granted, ID " + String(fid));
   } else {
     String reason = (p == FINGERPRINT_NOTFOUND) ? "NOT FOUND" : ((p == FINGERPRINT_PACKETRECIEVEERR) ? "COMM ERR" : "UNKNOWN ERR (" + String(p) + ")");
     String logMsg = getFormattedTime() + " >> FINGERPRINT :: ACCESS DENIED - Reason: " + reason;
-    if (isOnline) { terminal.println(logMsg); terminal.flush(); } else { Serial.println(logMsg + " (OFFLINE)"); }
+
+    if (isOnline) { 
+      terminal.println(logMsg); 
+      terminal.flush(); 
+      } 
+    else { 
+      Serial.println(logMsg + " (OFFLINE)"); 
+      }
     failedAttempts++;
-    showCentered("ACCESS DENIED", "ATTEMPTS: " + String(max(0,5 - failedAttempts))); beepFailure();
+    showCentered("ACCESS DENIED", "ATTEMPTS: " + String(max(0,5 - failedAttempts))); 
+    beepFailure();
     Serial.println("processFingerprint: Access Denied, Code: " + String(p));
-    if (failedAttempts >= 5) { lockoutSystem(); return; }
+    if (failedAttempts >= 5) { 
+      lockoutSystem(); 
+      return; 
+      }
   }
-  delay(2000); showMainMenu();
+  delay(2000); 
+  showMainMenu();
 }
 
 // Ham xoa van tay bang cach quet
@@ -1047,10 +1385,20 @@ void deleteFingerprintByScan() {
     if (millis() - lastErrorTime > ERROR_COOLDOWN) {
       Serial.println("deleteFingerprintByScan: Failed to convert image, code " + String(p));
       String msg = getFormattedTime() + " >> FINGERPRINT :: DELETE SCAN - IMAGE CONVERT FAIL - Code: " + String(p);
-      if(isOnline){ terminal.println(msg); terminal.flush(); } else { Serial.println(msg + " (OFFLINE)");}
+      if(isOnline){ 
+        terminal.println(msg); 
+        terminal.flush(); 
+        } 
+      else { 
+        Serial.println(msg + " (OFFLINE)");
+        }
       showCentered("FP SCAN ERROR", "TRY AGAIN"); lastErrorTime = millis();
     }
-    beepFailure(); delay(1000); fingerprintMode = FINGER_CHECK; showMainMenu(); return;
+    beepFailure(); 
+    delay(1000); 
+    fingerprintMode = FINGER_CHECK; 
+    showMainMenu(); 
+    return;
   }
   
   Serial.println("deleteFingerprintByScan: Searching for match to delete...");
@@ -1061,7 +1409,8 @@ void deleteFingerprintByScan() {
     if (finger.deleteModel(fid) == FINGERPRINT_OK) {
       String logMsg = getFormattedTime() + " >> FINGERPRINT :: DELETE SCAN SUCCESS - ID " + String(fid) + " DELETED";
       if (isOnline) { terminal.println(logMsg); terminal.flush(); } else { Serial.println(logMsg + " (OFFLINE)"); }
-      showCentered("FINGER DELETED", "ID: " + String(fid)); beepSuccess();
+      showCentered("FINGER DELETED", "ID: " + String(fid)); 
+      beepSuccess();
       Serial.println("deleteFingerprintByScan: Success, ID " + String(fid));
     } else {
       String logMsg = getFormattedTime() + " >> FINGERPRINT :: DELETE SCAN FAIL - SENSOR ERROR ON DELETE ID " + String(fid);
@@ -1082,35 +1431,47 @@ void deleteFingerprintByScan() {
 }
 
 // Ham them van tay (noi bo)
-void addFingerprint_internal() {
+void addFingerprint_internal() 
+{
   Serial.println("addFingerprint_internal: Process for ID " + String(fingerID));
-  String opContext = offlineAdminModeActive ? "ADMIN" : (isOnline ? "BLYNK V6" : "OFFLINE OP");
-  String termPrefix = getFormattedTime() + " >> FINGERPRINT ("+opContext+") ID " + String(fingerID) + " :: ";
-  String serialPrefix = "FP Internal ("+opContext+") ID " + String(fingerID) + ": ";
+  String opContext = offlineAdminModeActive ? "ADMIN" : (isOnline ? "BLYNK V6" : "OFFLINE");
+  String termPrefix = getFormattedTime() + " >> FINGERPRINT ("+opContext+") ID " + String(fingerID) + " :: "; // log cho blynk app
+  String serialPrefix = "FP Internal ("+opContext+") ID " + String(fingerID) + ": "; // log cho serial
 
   if (!finger.verifyPassword()) { 
       if (millis() - lastErrorTime > ERROR_COOLDOWN) {
          Serial.println(serialPrefix + "Sensor comm error pre-enroll.");
-         if(isOnline) terminal.println(termPrefix + "ADD FAIL - SENSOR COMM ERROR PRE-ENROLL");
+         if(isOnline) 
+          terminal.println(termPrefix + "ADD FAIL - SENSOR COMM ERROR PRE-ENROLL");
          lastErrorTime = millis();
       }
-      showCentered("SENSOR ERROR", "CHECK WIRING"); beepFailure(); delay(2000);
+      showCentered("SENSOR ERROR", "CHECK WIRING"); 
+      beepFailure(); 
+      delay(2000);
       return; 
   }
 
   int p = enrollFingerprint(fingerID); // enrollFingerprint xu ly LCD, beep, va log chi tiet
 
   if (p == FINGERPRINT_OK) {
-    if (isOnline) { terminal.println(termPrefix + "ADD SUCCESS"); } 
-    else { Serial.println(serialPrefix + "ADD SUCCESS (OFFLINE)"); }
+    if (isOnline) { 
+      terminal.println(termPrefix + "ADD SUCCESS"); 
+      } 
+    else { 
+      Serial.println(serialPrefix + "ADD SUCCESS (OFFLINE)"); 
+      }
     Serial.println(serialPrefix + "Success. Next available ID: " + String(fingerID + 1));
     fingerID++; 
-  } else {
-    if (isOnline) { terminal.println(termPrefix + "ADD FAIL - Enroll Error Code: " + String(p)); } 
-    else { Serial.println(serialPrefix + "ADD FAIL - Enroll Error Code: " + String(p) + " (OFFLINE)"); }
+  } 
+  else {
+    if (isOnline) { 
+      terminal.println(termPrefix + "ADD FAIL - Enroll Error Code: " + String(p)); 
+      } 
+    else { 
+      Serial.println(serialPrefix + "ADD FAIL - Enroll Error Code: " + String(p) + " (OFFLINE)"); 
+      }
     Serial.println(serialPrefix + "Failed, error " + String(p));
   }
-  if(isOnline) terminal.flush();
   delay(2500);
 }
 
@@ -1124,9 +1485,11 @@ int enrollFingerprint(int id_to_enroll) {
 
 #define SEND_LOG(msg_suffix) \
     do { \
-        if(isOnline) terminal.println(termPrefix + msg_suffix); \
-        Serial.println(serialPrefix + msg_suffix + (isOnline ? "" : " (OFFLINE)")); \
-        if(isOnline) terminal.flush(); \
+        if(isOnline) { \
+          terminal.println(termPrefix + msg_suffix); \
+          Serial.println(serialPrefix + msg_suffix + (isOnline ? "" : " (OFFLINE)")); \
+          terminal.flush(); \
+        } \
     } while(0)
 
   // Lan quet thu nhat
@@ -1135,81 +1498,114 @@ int enrollFingerprint(int id_to_enroll) {
   unsigned long startTime = millis();
   while (p != FINGERPRINT_OK && (millis() - startTime < 15000)) { 
     p = finger.getImage();
-    if (p == FINGERPRINT_NOFINGER) { vTaskDelay(50 / portTICK_PERIOD_MS); continue; }
+    if (p == FINGERPRINT_NOFINGER) { 
+      vTaskDelay(50 / portTICK_PERIOD_MS); 
+      continue; 
+      }
     if (p != FINGERPRINT_OK) {
       SEND_LOG("GetImage1 Error: " + String(p));
-      showCentered("SCAN ERROR 1", "CODE: " + String(p)); beepFailure(); return p;
+      showCentered("SCAN ERROR 1", "CODE: " + String(p)); 
+      beepFailure(); 
+      return p;
     }
   }
   if (p != FINGERPRINT_OK) { 
     SEND_LOG("Timeout Image1");
-    showCentered("TIMEOUT IMG 1", "TRY AGAIN"); beepFailure(); return FINGERPRINT_TIMEOUT;
+    showCentered("TIMEOUT IMG 1", "TRY AGAIN"); 
+    beepFailure(); 
+    return FINGERPRINT_TIMEOUT;
   }
   SEND_LOG("Image 1 taken.");
   p = finger.image2Tz(1);  // Chuyen doi anh lan 1
   if (p != FINGERPRINT_OK) {
     SEND_LOG("Convert1 Error: " + String(p));
-    showCentered("CONVERT ERR 1", "CODE: " + String(p)); beepFailure(); return p;
+    showCentered("CONVERT ERR 1", "CODE: " + String(p)); 
+    beepFailure(); 
+    return p;
   }
   SEND_LOG("Image 1 converted. Remove finger.");
-  showCentered("REMOVE FINGER", "WAIT..."); beepSuccess(); delay(2000); 
+  showCentered("REMOVE FINGER", "WAIT..."); 
+  beepSuccess(); 
+  delay(2000); 
   
   // Cho nguoi dung bo tay ra
-  startTime = millis(); p = 0; 
+  startTime = millis(); 
+  p = 0; 
   while (p != FINGERPRINT_NOFINGER && (millis() - startTime < 10000)) { 
-    p = finger.getImage(); vTaskDelay(50 / portTICK_PERIOD_MS);
+    p = finger.getImage(); 
+    vTaskDelay(50 / portTICK_PERIOD_MS);
   }
   if (p != FINGERPRINT_NOFINGER) {
     SEND_LOG("Removal Timeout/Error: " + String(p));
-    showCentered("REMOVAL TIMEOUT", "TRY AGAIN"); beepFailure(); return FINGERPRINT_TIMEOUT; 
+    showCentered("REMOVAL TIMEOUT", "TRY AGAIN"); 
+    beepFailure(); 
+    return FINGERPRINT_TIMEOUT; 
   }
   
   // Lan quet thu hai
   SEND_LOG("Finger removed. Place same finger again (2nd scan)...");
-  showCentered("PLACE SAME FINGER", "AGAIN"); beepSuccess();
+  showCentered("PLACE SAME FINGER", "AGAIN"); 
+  beepSuccess();
   
-  startTime = millis(); p = -1;
+  startTime = millis(); 
+  p = -1;
   while (p != FINGERPRINT_OK && (millis() - startTime < 15000)) { 
     p = finger.getImage();
-    if (p == FINGERPRINT_NOFINGER) { vTaskDelay(50 / portTICK_PERIOD_MS); continue; }
+    if (p == FINGERPRINT_NOFINGER) { 
+      vTaskDelay(50 / portTICK_PERIOD_MS); 
+      continue; 
+      }
     if (p != FINGERPRINT_OK) {
       SEND_LOG("GetImage2 Error: " + String(p));
-      showCentered("SCAN ERROR 2", "CODE: " + String(p)); beepFailure(); return p;
+      showCentered("SCAN ERROR 2", "CODE: " + String(p)); 
+      beepFailure(); 
+      return p;
     }
   }
   if (p != FINGERPRINT_OK) { 
     SEND_LOG("Timeout Image2");
-    showCentered("TIMEOUT IMG 2", "TRY AGAIN"); beepFailure(); return FINGERPRINT_TIMEOUT;
+    showCentered("TIMEOUT IMG 2", "TRY AGAIN"); 
+    beepFailure(); 
+    return FINGERPRINT_TIMEOUT;
   }
   SEND_LOG("Image 2 taken.");
   p = finger.image2Tz(2);  // Chuyen doi anh lan 2
   if (p != FINGERPRINT_OK) {
     SEND_LOG("Convert2 Error: " + String(p));
-    showCentered("CONVERT ERR 2", "CODE: " + String(p)); beepFailure(); return p;
+    showCentered("CONVERT ERR 2", "CODE: " + String(p)); 
+    beepFailure(); 
+    return p;
   }
   
   // Tao model tu 2 lan quet
   SEND_LOG("Image 2 converted. Creating model...");
-  p = finger.createModel();
+  p = finger.createModel();  // so sanh 2 mau van tay va tao model
   if (p != FINGERPRINT_OK) {
     SEND_LOG("CreateModel Error: " + String(p) + (p == FINGERPRINT_ENROLLMISMATCH ? " - FINGERPRINTS DID NOT MATCH!" : ""));
     if (p == FINGERPRINT_ENROLLMISMATCH) {
       showCentered("NO MATCH", "FINGERS DIFFER?");
-    } else { showCentered("MODEL ERR", "CODE: " + String(p)); }
-    beepFailure(); return p;
+    } 
+    else { 
+      showCentered("MODEL ERR", "CODE: " + String(p)); 
+      }
+    beepFailure(); 
+    return p;
   }
   
   // Luu model vao sensor
   SEND_LOG("Model created. Storing at ID: " + String(id_to_enroll));
-  p = finger.storeModel(id_to_enroll);
+  p = finger.storeModel(id_to_enroll);  // luu model vua tao vao
   if (p != FINGERPRINT_OK) {
     SEND_LOG("StoreModel Error: " + String(p));
-    showCentered("STORE ERROR", "CODE: " + String(p)); beepFailure(); return p;
+    showCentered("STORE ERROR", "CODE: " + String(p)); 
+    beepFailure(); 
+    return p;
   }
   SEND_LOG("Model stored successfully!");
-  showCentered("FINGER ADDED", "ID: " + String(id_to_enroll)); beepSuccess();
+  showCentered("FINGER ADDED", "ID: " + String(id_to_enroll)); 
+  beepSuccess();
   return FINGERPRINT_OK; 
-#undef SEND_LOG
+#undef SEND_LOG // xoa define
 }
 
 // Ham xoa van tay theo ID
@@ -1247,7 +1643,8 @@ void checkRFID() {
   String* uidPtr = NULL; 
   if (xQueueReceive(rfidQueue, &uidPtr, 0) == pdTRUE && uidPtr != NULL) {  // Nhan UID tu queue
     String uid = *uidPtr; delete uidPtr;   
-    Serial.print("Processing RFID UID from queue: "); Serial.println(uid);
+    Serial.print("Processing RFID UID from queue: "); 
+    Serial.println(uid);
     beepSuccess(); 
     
     // Xac dinh nguyen nhan thao tac
@@ -1263,37 +1660,66 @@ void checkRFID() {
 
     if (addCardMode) {  // Che do them the
       bool alreadyExists = false;
-      for(int i=0; i < cardCount; i++){ if(knownCards[i] == uid){ alreadyExists = true; break; } }
+      for(int i=0; i < cardCount; i++)
+      { 
+        if(knownCards[i] == uid)
+        { 
+          alreadyExists = true; 
+          break; 
+        } 
+      }
       
       if(alreadyExists){
-        if (isOnline) { terminal.println(termPrefix + "ADD FAIL - CARD ALREADY EXISTS - UID: " + uid); }
+        if (isOnline) { 
+          terminal.println(termPrefix + "ADD FAIL - CARD ALREADY EXISTS - UID: " + uid); 
+          }
         Serial.println(serialPrefix + "Card already exists: " + uid + (isOnline ? "" : " (OFFLINE)"));
-        showCentered("CARD EXISTS", uid.substring(0, min((int)uid.length(), 8))); beepFailure();
-      } else if (cardCount < 100) {
-        knownCards[cardCount] = uid; saveCardToEEPROM(cardCount, uid); 
-        if (isOnline) { terminal.println(termPrefix + "ADD SUCCESS - UID: " + uid); }
-        Serial.println(serialPrefix + "Card added: " + uid + (isOnline ? "" : " (OFFLINE)")); cardCount++;
-        showCentered("CARD ADDED", uid.substring(0, min((int)uid.length(), 8))); beepSuccess();
-      } else { 
-        if (isOnline) { terminal.println(termPrefix + "ADD FAIL - STORAGE FULL - UID: " + uid); }
+        showCentered("CARD EXISTS", uid.substring(0, min((int)uid.length(), 8))); 
+        beepFailure();
+      } 
+      else if (cardCount < 100) {
+        knownCards[cardCount] = uid; 
+        saveCardToEEPROM(cardCount, uid); 
+        if (isOnline) { 
+          terminal.println(termPrefix + "ADD SUCCESS - UID: " + uid); 
+          }
+        Serial.println(serialPrefix + "Card added: " + uid + (isOnline ? "" : " (OFFLINE)")); 
+        cardCount++;
+        showCentered("CARD ADDED", uid.substring(0, min((int)uid.length(), 8))); 
+        beepSuccess();
+      } 
+      else { 
+        if (isOnline) { 
+          terminal.println(termPrefix + "ADD FAIL - STORAGE FULL - UID: " + uid); 
+          }
         Serial.println(serialPrefix + "Card storage full, cannot add: " + uid + (isOnline ? "" : " (OFFLINE)"));
-        showCentered("STORAGE FULL", "CANNOT ADD"); beepFailure();
+        showCentered("STORAGE FULL", "CANNOT ADD"); 
+        beepFailure();
       }
       addCardMode = false; 
       if(blynkCardOpActive) blynkCardOpActive = false;
     
-    } else if (deleteCardMode) {  // Che do xoa the
+    } 
+    else if (deleteCardMode) {  // Che do xoa the
       if (deleteCardFromEEPROM(uid)) { 
-        if (isOnline) { terminal.println(termPrefix + "DELETE SUCCESS - UID: " + uid); }
+        if (isOnline) { 
+          terminal.println(termPrefix + "DELETE SUCCESS - UID: " + uid); 
+          }
         Serial.println(serialPrefix + "Card deleted: " + uid + (isOnline ? "" : " (OFFLINE)"));
-        showCentered("CARD DELETED", uid.substring(0, min((int)uid.length(), 8))); beepSuccess();
-      } else { 
-        if (isOnline) { terminal.println(termPrefix + "DELETE FAIL - CARD NOT FOUND - UID: " + uid); }
+        showCentered("CARD DELETED", uid.substring(0, min((int)uid.length(), 8))); 
+        beepSuccess();
+      } 
+      else { 
+        if (isOnline) { 
+          terminal.println(termPrefix + "DELETE FAIL - CARD NOT FOUND - UID: " + uid); 
+          }
         Serial.println(serialPrefix + "Card not found to delete: " + uid + (isOnline ? "" : " (OFFLINE)"));
-        showCentered("CARD NOT FOUND", "CHECK UID"); beepFailure();
+        showCentered("CARD NOT FOUND", "CHECK UID"); 
+        beepFailure();
       }
       deleteCardMode = false; 
-      if(blynkCardOpActive) blynkCardOpActive = false;
+      if(blynkCardOpActive) 
+        blynkCardOpActive = false;
 
     } else {  // Kiem tra quyen truy cap binh thuong
       if (isCardKnown(uid)) { 
@@ -1366,7 +1792,14 @@ void loadCardsFromEEPROM() {
 // Ham xoa the khoi EEPROM
 bool deleteCardFromEEPROM(String uid) {
   int foundIndex = -1;
-  for (int i = 0; i < cardCount; i++) if (knownCards[i] == uid) { foundIndex = i; break; }
+  for (int i = 0; i < cardCount; i++)
+  {
+    if (knownCards[i] == uid) 
+    { 
+      foundIndex = i; 
+      break; 
+      }
+  } 
   
   if (foundIndex != -1) {
     Serial.println("EEPROM Delete Card: UID " + uid + " found at index " + String(foundIndex) + ". Deleting.");
