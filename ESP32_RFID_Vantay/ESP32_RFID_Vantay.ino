@@ -80,8 +80,8 @@ enum FingerprintMode
 FingerprintMode fingerprintMode = FINGER_CHECK;
 
 // Cau hinh EEPROM
-#define EEPROM_SIZE 1024
-#define PASSWORD_ADDR 400                        // Dia chi bat dau luu mat khau trong EEPROM
+#define EEPROM_SIZE 2048
+#define PASSWORD_ADDR 1000                        // Dia chi bat dau luu mat khau trong EEPROM
 String defaultPassword = "8888";                 // Mat khau mac dinh
 const String MASTER_OFFLINE_ADMIN_PIN = "2003";  // PIN admin de vao che do quan tri
 
@@ -1854,23 +1854,26 @@ void loadCardsFromEEPROM() {
   cardCount = 0; 
   Serial.println("EEPROM Load Cards: Loading cards...");
   int clearedSlots = 0;
-  for (int i = 0; i < 100; i++) {
+  for (int i = 0; i < 100; i++) { // quet qua 100 vi tri luu the
     String uid = ""; 
     int addr = i * 10; 
     bool validCardCharFound = false; 
     for (int j = 0; j < 10; j++) 
     {
       char c = EEPROM.read(addr + j);
-      if (c == 0 || (c == 0xFF && j == 0)) 
+      if (c == 0 || (c == 0xFF && j == 0)) // Neu byte dau tien la 0xFF thi day la o trong
         break; 
       uid += c; 
       validCardCharFound = true;
     }
-    if (uid.length() > 0 && validCardCharFound && uid.length() <= 8) { 
+    if (uid.length() > 0 && validCardCharFound && uid.length() <= 8) 
+    { 
+      // du lieu hop le
       knownCards[cardCount++] = uid; 
       Serial.println("EEPROM Load Cards: Loaded Card[" + String(i) + "]: " + uid);
     } 
-    else if (uid.length() > 0 || (EEPROM.read(addr) != 0xFF && EEPROM.read(addr) != 0x00) ) {
+    else if (uid.length() > 0 || (EEPROM.read(addr) != 0xFF && EEPROM.read(addr) != 0x00) ) 
+    {
        // Tim thay du lieu khong chuan hoac bi hong
        bool needsClearing = false;
        for(int k=0; k < 10; ++k) 
@@ -1987,8 +1990,7 @@ void clearEEPROM() {
   for (int i = 0; i < PASSWORD_ADDR + 8; i++) 
     EEPROM.write(i, 0); 
   
-  bool commitSuccess = EEPROM.commit(); 
-  if(commitSuccess) 
+  if(EEPROM.commit()) 
     Serial.println("EEPROM Clear: Memory commit SUCCESS.");
   else 
     Serial.println("EEPROM Clear: Memory commit FAIL.");
